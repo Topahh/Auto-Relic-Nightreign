@@ -219,3 +219,60 @@ class ItemMatcher:
             )
 
         return False, "No match", [], [], False, ""
+    
+    def match_detailed(
+        self,
+        texts: List[str],
+    ) -> Tuple[bool, str, List[str], List[str], bool, str, Dict[str, "MatchResult"]]:
+        """
+        Identique à match() mais retourne un 7e élément : tous les MatchResult par groupe.
+        
+        Returns:
+            (matched, reason, matched_terms, blacklist_hit, has_partial, group_name, all_results)
+            
+        all_results: Dict[group_name -> MatchResult] pour TOUS les groupes évalués.
+        Permet à stats.py de connaître les scores exacts (A:x/y, B:x, BL:x) par groupe.
+        """
+        if not texts:
+            return False, "No content", [], [], False, "", {}
+
+        merged_text = "".join([self._clean(t) for t in texts])
+
+        best_partial: Optional[MatchResult] = None
+        all_results: Dict[str, MatchResult] = {}
+
+        for group_name in sorted(self.cfg.KEYWORD_GROUPS.keys(), key=natural_sort_key):
+            group_config = self.cfg.KEYWORD_GROUPS[group_name]
+            result = self._match_group(group_name, group_config, merged_text)
+            all_results[group_name] = result
+
+            print(f"   [MATCH] {result.debug_str()}")
+
+            if result.keep:
+                all_matched = result.a_matched + result.b_matched
+                return (
+                    True,
+                    f"{group_name}: {', '.join(all_matched)}",
+                    all_matched,
+                    [],
+                    True,
+                    group_name,
+                    all_results,
+                )
+
+            if result.has_any_primary:
+                if best_partial is None or len(result.a_matched) > len(best_partial.a_matched):
+                    best_partial = result
+
+        if best_partial:
+            reason = f"No match — best partial: {best_partial.debug_str()}"
+            return (
+                False, reason,
+                best_partial.a_matched,
+                best_partial.blacklist_hit,
+                True,
+                best_partial.group_name,
+                all_results,
+            )
+
+        return False, "No match", [], [], False, "", all_results

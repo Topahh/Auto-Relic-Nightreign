@@ -30,7 +30,12 @@ class ForgeBot:
         self.matcher = ItemMatcher(self.cfg)
         self.capture = ScreenCapture(self.cfg.SCAN_REGION)
         self.debug_screenshot()
-        self.stats = Statistics(self.cfg.lang, max_in_memory_details=300)
+        self.stats = Statistics(
+            self.cfg.lang,
+            max_in_memory_details=300,
+            flush_every=300,
+            temp_path="/tmp/hajiwo_stats.jsonl",
+        )
         self.log_path = None
         self.last_stats_flush_scanned = 0
         self.stop_signal = StopSignal(self.cfg.lang)
@@ -299,8 +304,27 @@ class ForgeBot:
 
         print(f" [{index:2d}] OCR: '{recognized}' (len={len(recognized)})")
 
-        keep, info, matched_kw, blacklist_kw, has_partial, group_name = self.matcher.match(texts)
+        keep, info, matched_kw, blacklist_kw, has_partial, group_name, all_results = \
+            self.matcher.match_detailed(texts)
         self.stats.scanned += 1
+
+        if keep:
+            outcome = "kept"
+        elif has_partial and blacklist_kw:
+            outcome = "blacklisted"
+        elif has_partial:
+            outcome = "partial"
+        else:
+            outcome = "discard"
+
+        self.stats.record_relic(
+            batch=self.stats.rounds,
+            index=index,
+            outcome=outcome,
+            group=group_name or "",
+            all_results=all_results,
+            matched_kw=matched_kw or [],
+        )
 
         if keep:
             self.stats.kept += 1
@@ -467,7 +491,14 @@ class ForgeBot:
             except Exception as e:
                 print(f"[WARNING] Failed to flush stats on shutdown: {e}")
 
+            # Flush résiduel du buffer de records structurés
+            try:
+                self.stats.flush_final()
+            except Exception as e:
+                print(f"[WARNING] Failed to flush record buffer: {e}")
+
             self.stats.print_report()
+            self.stats.print_rich_summary()
 
             if self.log_path:
                 try:
@@ -477,9 +508,16 @@ class ForgeBot:
                         include_details=True,
                         clear_after_write=False,
                     )
+                    self.stats.save_rich_summary(self.log_path)   # ← NOUVEAU : append dans le même fichier
                     print(f"\n[OK] {self.cfg.lang.get('log_saved')}: {self.log_path}")
                 except Exception as e:
                     print(f"[WARNING] Failed to append final summary: {e}")
+
+            # Nettoyage du fichier temp .jsonl
+            try:
+                self.stats.cleanup_temp()
+            except Exception as e:
+                print(f"[WARNING] Failed to cleanup temp stats file: {e}")
 
             try:
                 self.capture.close()

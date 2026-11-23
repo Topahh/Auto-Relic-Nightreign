@@ -1,14 +1,3 @@
-【前置安装说明】
-一、环境要求
-使用本工具前，请确认已安装Python 3.13版本（可使用本文件自带版本）。
-
-二、在线安装依赖库
-1. 按下Win+R组合键，打开"运行"对话框；
-2. 输入"cmd"，打开命令提示符窗口；
-3. 在命令行中依次输入以下内容：
-python -m pip install pymem paddleocr opencv-python pyautogui pydirectinput keyboard
-python -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-
 ======================================
 【Pre-installation Instructions】
 
@@ -22,6 +11,17 @@ II. Dependency Online Installation
 python -m pip install pymem paddleocr opencv-python pyautogui pydirectinput keyboard
 python -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 
+Imports for Windows :
+py -3.12 -m pip install --upgrade pip
+py -3.12 -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+py -3.12 -m pip install paddleocr==3.5.0 paddlex==3.5.1 opencv-python pillow numpy pyautogui pydirectinput pymem keyboard requests PyYAML typing-extensions
+py -3.12 -c "import paddle, paddleocr, cv2, numpy, pyautogui, pydirectinput, pymem, keyboard;
+
+Imports for Linux :
+sudo dnf install -y python3.12 python3.12-pip python3-gobject python3-dbus gstreamer1-plugins-base gstreamer1
+python3.12 -m pip install --upgrade pip
+python3.12 -m pip install paddlepaddle==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python3.12 -m pip install paddleocr==3.5.0 paddlex==3.5.1 opencv-python pillow numpy pyautogui mss pynput keyboard requests PyYAML typing-extensions dbus-python
 
 project/
 ├── main.py                         ← Point d'entrée, contient ForgeBot
