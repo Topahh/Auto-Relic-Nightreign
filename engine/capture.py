@@ -77,6 +77,9 @@ class ScreenCapture:
         )
         self._pipewire_fail_count     = 0
         self._pipewire_fail_threshold = 5
+        self._is_wayland              = True
+        # RAM-backed temp dir: the frame file never touches the disk
+        self._tmp_dir = "/dev/shm" if os.path.isdir("/dev/shm") else None
         # Bind
         self.capture_full = self._capture_full_wayland
 
@@ -116,6 +119,9 @@ class ScreenCapture:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            # Own session: a terminal Ctrl+C must not kill the helper before it
+            # can close the ScreenCast session. close() stops it cleanly.
+            start_new_session=True,
         )
 
         line = _readline_with_timeout(self.helper.stdout, timeout=60).strip()
@@ -150,7 +156,8 @@ class ScreenCapture:
     # Wayland — raw full-screen capture
     # ------------------------------------------------------------------
 
-    def _capture_full_wayland(self, retries: int = 3, retry_delay: float = 0.15) -> Optional[np.ndarray]:
+    def _capture_full_wayland(self, retries: int = 3, retry_delay: float = 0.15,
+                              crop: Optional[tuple] = None) -> Optional[np.ndarray]:
         """
         Request a full-screen capture from the ScreenCast helper and return it
         as a BGR numpy array, or None on transient PipeWire failure.
@@ -162,11 +169,14 @@ class ScreenCapture:
         for attempt in range(1, retries + 1):
             self._ensure_helper()
 
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            # Uncompressed BMP: PNG encode+decode of a full screen cost ~75 ms
+            with tempfile.NamedTemporaryFile(suffix=".bmp", delete=False, dir=self._tmp_dir) as tmp:
                 tmp_path = tmp.name
 
             try:
-                self.helper.stdin.write(f"CAPTURE {tmp_path}\n")
+                # Optional crop done by the helper: only the OCR region is written
+                crop_arg = " {} {} {} {}".format(*crop) if crop else ""
+                self.helper.stdin.write(f"CAPTURE {tmp_path}{crop_arg}\n")
                 self.helper.stdin.flush()
 
                 reply = _readline_with_timeout(self.helper.stdout, timeout=20).strip()
@@ -270,6 +280,10 @@ class ScreenCapture:
 
         Raises RuntimeError only if the calibration rectangle is out of bounds.
         """
+        if getattr(self, "_is_wayland", False) and self._calibration is not None and not self.debug_mode:
+            # The helper crops before writing the file (much less data to move)
+            return self._capture_full_wayland(crop=self._calibration)
+
         img = self.capture_full()
         if img is None:
             return None
@@ -388,25 +402,40 @@ class ScreenCapture:
 
     def close(self):
         """
-        Gracefully shut down the helper process (Wayland only).
-        Sends a QUIT command and waits for acknowledgment before terminating.
-        Silently ignores errors — the process is forcefully terminated if needed.
+        Shut down the helper process (Wayland only). Safe to call twice.
+        1. QUIT  -> the helper closes its pipeline + ScreenCast session itself
+        2. SIGTERM if it has not exited after 5 s (helper also cleans up on it)
+        3. SIGKILL as a last resort
         No-op on Windows / X11 (no helper process).
         """
-        if not hasattr(self, 'helper') or self.helper is None:
+        helper = getattr(self, 'helper', None)
+        if helper is None:
             return
+        self.helper = None
 
         try:
-            if self.helper.poll() is None:
-                self.helper.stdin.write("QUIT\n")
-                self.helper.stdin.flush()
-                _readline_with_timeout(self.helper.stdout, timeout=5)
+            if helper.poll() is None:
+                helper.stdin.write("QUIT\n")
+                helper.stdin.flush()
         except Exception:
             pass
-        finally:
+
+        for stop in (None, helper.terminate, helper.kill):
             try:
-                if self.helper.poll() is None:
-                    self.helper.terminate()
+                if stop is not None:
+                    if helper.poll() is not None:
+                        break
+                    stop()
+                helper.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception:
+                break
+
+        for stream in (helper.stdin, helper.stdout, helper.stderr):
+            try:
+                if stream:
+                    stream.close()
             except Exception:
                 pass
-            self.helper = None

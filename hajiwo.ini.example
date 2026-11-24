@@ -1,0 +1,241 @@
+[General]
+# UI language (zh = 中文, en = English, fr = Français...)
+language = en
+
+# region Screen and Controls
+[ScreenRegion]
+# Screen capture area — adjust to your resolution
+left   = 600
+top    = 237
+width  = 815
+height = 666
+
+[Controls]
+# Key bindings — use xdotool key names (e.g. f, Return, Escape, 2, 3, Down)
+key_interact = f
+key_down     = down
+key_right    = right
+key_keep     = right
+key_discard  = 3
+key_chose_10_relics = f2
+
+[Timing]
+# ── Keyboard base ──────────────────────────────────────────────────────────
+# Delay for holding down keys (seconds)
+key_hold          = 0.08
+# Delay after each keypress (seconds)
+key_interval      = 0.15
+# UI transition wait for forge start/end screens (seconds)
+wait_anim         = 1.0
+# Additional delay for UI transitions after forge start/end (seconds)
+wait_anim_extra   = 7.0
+# Max items processed per forge round
+batch_size        = 10
+
+# ── Keyboard extended ──────────────────────────────────────────────────────
+# Sleep between the 2nd and 3rd KEY_INTERACT inside forge_start() navigation
+forge_menu_sleep  = 0.50
+# Sleep after forge_start() completes, before capturing the first item
+forge_ready_sleep = 0.50
+# Sleep after xdotool windowfocus in _focus_game()
+focus_delay       = 0.05
+# Sleep steps in warmup_permissions()
+warmup_delay      = 0.20
+
+# ── Sync / OCR (ForgeBot) ──────────────────────────────────────────────────
+# Frame pixel-diff mean threshold to detect a screen change
+sync_threshold    = 2.5
+# Max time to wait for the next valid item (seconds)
+sync_timeout      = 3.0
+# Polling interval during the wait_for_next_item loop (seconds)
+poll_interval     = 0.10
+# Consecutive empty OCR reads before declaring end of item list
+empty_reads_max   = 3
+# Minimum OCR text length to be considered a valid read
+min_text_len      = 2
+
+[OCR]
+# PaddleOCR recognition language
+# Common values: en (English), ch (Chinese), fr (French), japan (Japanese)
+lang = en
+
+# endregion
+# region WORDS
+[validation]
+MIN_TEXT_LEN = 40
+RELIC_MIN_LEN = 61
+
+[RelicMenu]
+# Words used to identify each menu with OCR
+# the Relic menu with the 10 newly dropt relics corresponds to relic_tokens
+# the menu that let you choose the nb of flatstones to buy corresponds to flatstone_tokens
+flatstone_tokens = purchase how many, 1/10, 10/10, required Murk, F1, F2, OK cancel, OK Q, F OK, Back
+main_menu_tokens = reveal its precious gift, precious gift, reveal its precious, reveal its gift, up to ver. 1.02
+relic_tokens = add, addremovefavorites, favorites, sell, sellnow, close, polished, delicate, grand, drizzly, burning, tranquil, luminous
+reset_menu_tokens = 1 Reset, F close 1 Reset, F close 1 Reset, close 1 Reset
+
+
+[Keywords]
+# ============ Keyword Groups Configuration ============
+# Format:
+#   GroupName_a        = required keywords (separate with ||)
+#   GroupName_b        = optional keywords (at least one required if non-empty)
+#   GroupName_min      = min number of 'a' keywords to match (default: 1)
+#   GroupName_blacklist = forced DISCARD if any of these are found
+# Group names are customizable (R1, G1, G2 ... recommended)
+
+
+# GOD Defense relic DEEP :
+G1_a = Improved Physical Damage Negation +2 || Improved Affinity Damage Negation +2 || Partial hp restoration upon post-damage attacks +1 || Partial hp restoration upon post-damage attacks +2 || physical attack up +4
+G1_b =
+G1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Near Death Reduces Art Gauge || Buildup When Below Max HP || Death Buildup
+G1_min = 3
+
+
+# Executeur face DEEP:
+E1_a = Partial hp restoration upon post-damage attacks +1 || Partial hp restoration upon post-damage attacks +2 || arcane +3 || executor || Stamina Recovery upon Landing Attacks +1 || Attack power increased for each Night Invader defeated || Improved Physical Damage Negation +2 || Improved Affinity Damage Negation +2
+E1_b = physical attack up +4
+E1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Buildup When Below Max HP || Death Buildup
+E1_min = 2
+
+# Executeur Arcane DEEP:
+E2_a = Partial hp restoration upon post-damage attacks +1 || Partial hp restoration upon post-damage attacks +2 || arcane +3 || executor || Stamina Recovery upon Landing Attacks +1 || Attack power increased for each Night Invader defeated || Improved Physical Damage Negation +2 || Improved Affinity Damage Negation +2 || Attack power up when facing scarlet rot-afflicted enemy +2 || Attack power up when facing poison-afflicted enemy +2 || Taking Attacks Improves Attack Power || 
+E2_b = physical attack up +4
+E2_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Buildup When Below Max HP || Death Buildup || Reduced Arcane || Reduced Vigor and Arcane
+E2_min = 2
+
+
+# Undertaker face DEEP :
+U1_a = Undertaker || Partial hp restoration upon post-damage attacks +1 || Partial hp restoration upon post-damage attacks +2 || Taking Attacks Improves Attack Power || HP Restoration upon Hammer Attacks || Stamina Recovery upon Landing Attacks +1 || Character Skill Cooldown Reduction || Ultimate Art Auto Charge +3 || Improved Stance-Breaking || Improved Physical Damage Negation +2 || Improved Affinity Damage Negation +2
+U1_b = physical attack up +4
+U1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Near Death Reduces Art Gauge || Buildup When Below Max HP
+U1_min = 2
+
+
+# Recluse Carian DEEP :
+R1_a = Magic Attack Power Up +4 || Magic Attack Power Up +3 || Improved Sorceries +1 || Improved Sorceries +2 || Improved Carian Sword Sorcery || Recluse || Changes compatible armaments sorcery to Carian Greatsword at start of expedition || Increased Maximum FP || Reduced FP Consumption || Max FP Up with 3+ Staves || Continuous FP Recovery || Improved Physical Damage Negation +2 || Improved Affinity Damage Negation +2 || Increased Maximum HP || Vigor+3 || Improved affinity attack power +2
+R1_b =
+R1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Near Death Reduces Art Gauge || Buildup When Below Max HP
+R1_min = 3
+
+# Recluse 
+
+
+; #########
+; # Executeur face normal:
+; E1_a = Partial hp restoration upon post-damage attacks +1 || Partial hp restoration upon post-damage attacks +2 || arcane +3 || executor || Stamina Recovery upon Landing Attacks +1 || Improved Attack Power with 3+ Katana Equipped
+; E1_b = physical attack up +2
+; E1_blacklist =
+; E1_min = 2
+
+
+; # Undertaker face normal :
+; U1_a = Undertaker || Partial hp restoration upon post-damage attacks || Taking Attacks Improves Attack Power || HP Restoration upon Hammer Attacks || Stamina Recovery upon Landing Attacks +1 || Character Skill Cooldown Reduction || Ultimate Art Auto Charge +3 || Improved Stance-Breaking || Improved Attack Power with 3+ Hammers Equipped
+; U1_b = physical attack up +2
+; U1_blacklist =
+; U1_min = 2
+
+
+; # Recluse Carian normal :
+; R1_a = Recluse || Magic Attack Power Up +2 || Improved Carian Sword Sorcery
+; R1_b =
+; R1_blacklist =
+; R1_min = 3
+
+
+; #########
+
+; # Recluse — cœur + magie + découverte catalyst/seals
+; R1_a = Magic Attack Power Up +4
+; R1_b = [Recluse] Collecting affinity residue activates Terra Magica || [Recluse] Suffer blood loss and increase attack power upon Art activation || [Recluse] Improved Intelligence and Faith, Reduced Mind || [Recluse] Activating Ultimate Art raises Max HP || [Recluse] Collect Affinity Residues to Negate Affinity || Dormant Power Helps Discover Sacred Seals || Dormant Power Helps Discover Staves || Increased Maximum FP || Reduced FP Consumption || Continuous FP Recovery
+; R1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Near Death Reduces Art Gauge || Buildup When Below Max HP
+; R1_min = 1
+
+
+; # Executor — dex/arc + katana + sustain
+; E1_a = Physical Attack Up +4 || Improved Skill Attack Power || Improved Attack Power with 3+ Katana Equipped || Improved Katana Attack Power || Dormant Power Helps Discover Katana
+; E1_b = Executor || [Executor] Improved Dexterity and Arcane, Reduced Vigor || Improved Stance-Breaking || Improved Critical Hits || [Executor] While Character Skill is active, unlocking use of cursed sword restores HP || [Executor] Roaring restores HP while Art is active || Stamina Recovery upon Landing Attacks +1 || Improved Critical Hits || Improved Critical Hits +1 || Attack power increased for each evergaol prisoner defeated
+; E1_blacklist = Continuous HP Loss || All Resistances Down || Reduced Rune Acquisition || Near Death Reduces Max HP || Repeated Evasions Lower Negation || Near Death Reduces Art Gauge || Buildup When Below Max HP
+; E1_min = 1
+
+
+# endregion
+# region Interface Text
+# =============================================================================
+# Interface Text
+# =============================================================================
+
+[Language_zh]
+# 用户交互（10条）
+wait_user           = 等待用户操作
+lock_success_title  = 钱币锁定成功
+follow_steps        = 请按以下步骤操作
+enter_shop          = 1. 进入游戏商店界面
+select_item         = 2. 选中要锻造的遗物
+press_enter         = 3. 按回车键开始自动锻造
+press_esc           = 提示：按ESC可随时终止脚本
+switch_window       = 请切换到游戏窗口
+seconds_start       = 秒后开始
+user_cancel         = 用户取消操作
+
+# 运行状态（10条）
+round_title         = 第
+round_suffix        = 轮
+item_index          = /10
+recognize           = 识别
+keep                = 保留
+blacklist_deny      = 黑名单否决
+total               = 累计
+start_forge         = 开始自动锻造
+esc_detected        = 检测到ESC键
+user_stop           = 用户终止
+
+# 统计报表（10条）
+stats_title         = 运行统计
+total_rounds        = 总轮数
+total_scanned       = 扫描数
+total_kept          = 保留数
+keep_rate           = 保留率
+kept_items          = 保留道具词条
+blacklist_items     = 被黑名单否决
+件                  = 件
+log_saved           = 统计结果已保存至
+program_done        = 程序执行完毕
+
+[Language_en]
+# User Interaction
+wait_user           = Waiting for user input
+lock_success_title  = Currency Lock Successful
+follow_steps        = Please follow these steps
+enter_shop          = 1. Enter the in-game shop
+select_item         = 2. Select the relic to forge
+press_enter         = 3. Press Enter to start auto-forging
+press_esc           = Tip: Press ESC to stop at any time
+switch_window       = Please switch to game window
+seconds_start       = seconds until start
+user_cancel         = User cancelled
+
+# Running Status
+round_title         = Round 
+round_suffix        = Turn
+item_index          = /10
+recognize           = Recognized
+keep                = Keep
+blacklist_deny      = Blacklist Denied
+total               = Total
+start_forge         = Starting auto-forge
+esc_detected        = ESC detected
+user_stop           = User stopped
+
+# Statistics Report
+stats_title         = Statistics
+total_rounds        = Total Rounds
+total_scanned       = Scanned
+total_kept          = Kept
+keep_rate           = Keep Rate
+kept_items          = Kept Items
+blacklist_items     = Blacklist Denied
+件                  = items
+log_saved           = Statistics saved to
+program_done        = Program Finished
+# endregion

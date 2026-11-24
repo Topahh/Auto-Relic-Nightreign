@@ -1,5 +1,6 @@
 # main.py
 import os
+import signal
 import time
 import datetime
 import cv2
@@ -8,15 +9,16 @@ from typing import Tuple, Optional
 
 from config.settings import Config
 from engine.ocr import OCREngine
-from engine.keyboard import KeyboardController
+from engine.keyboard import KeyboardController, GameWindowLost
 from engine.capture import ScreenCapture
 from engine.matcher import ItemMatcher
 from engine.flow import ForgeFlow, FlowHooks
-from engine.state_machine import ForgeBotStateMachine, FlowContext, TickInput, UIState
+from engine.state_machine import ForgeBotStateMachine, FlowContext, TickInput, UIState, Action
 # from engine.locker import CurrencyLocker
 from utils.text import fuzzy_clean_text, natural_sort_key
 from utils.stats import Statistics
 from utils.signal import StopSignal
+from utils.log import dbg
 
 
 # region ForgeBot
@@ -27,9 +29,22 @@ class ForgeBot:
         self.cfg = Config()
         self.ocr = OCREngine(self.cfg)
         self.keyboard = KeyboardController(self.cfg)
+        # Last OCR'd screen, reused until a key is pressed (or the next tick).
+        self._frame_cache = None
+        self._prefetched = False
+        self._cache_settled = False   # cache passed the stability check
+        _raw_press = self.keyboard.press
+
+        def _press_and_invalidate(*args, **kwargs):
+            self._frame_cache = None
+            self._prefetched = False
+            return _raw_press(*args, **kwargs)
+
+        self.keyboard.press = _press_and_invalidate
         self.matcher = ItemMatcher(self.cfg)
         self.capture = ScreenCapture(self.cfg.SCAN_REGION)
-        self.debug_screenshot()
+        if self.cfg.DEBUG:
+            self.debug_screenshot()
         self.stats = Statistics(
             self.cfg.lang,
             max_in_memory_details=300,
@@ -37,6 +52,8 @@ class ForgeBot:
             temp_path="/tmp/hajiwo_stats.jsonl",
         )
         self.log_path = None
+        self.audit_path = None   # one line per relic: OCR text + decision
+        self._audit_bytes = 0
         self.last_stats_flush_scanned = 0
         self.stop_signal = StopSignal(self.cfg.lang)
         self.stop_signal.clear()
@@ -91,32 +108,32 @@ class ForgeBot:
     def ensure_relic_menu(self, index: int, max_retries: int = 5) -> bool:
         for attempt in range(1, max_retries + 1):
             _, texts, recognized = self.capture_text()
-            print(f" [{index:2d}] [ENSURE] attempt {attempt}/{max_retries} -> '{recognized}'")
+            dbg(f" [{index:2d}] [ENSURE] attempt {attempt}/{max_retries} -> '{recognized}'")
 
             if self.is_relic_menu(recognized):
                 return True
 
             if self.is_flatstone_menu(recognized):
-                print(f" [{index:2d}] [ENSURE] flatstone -> enter relic menu")
+                dbg(f" [{index:2d}] [ENSURE] flatstone -> enter relic menu")
                 self.keyboard.press(self.cfg.KEY_INTERACT)
                 time.sleep(self.cfg.WAIT_ANIM_EXTRA)
                 continue
 
             if self.is_main_menu(recognized):
-                print(f" [{index:2d}] [ENSURE] main menu -> open flatstone path")
+                dbg(f" [{index:2d}] [ENSURE] main menu -> open flatstone path")
                 self.keyboard.press(self.cfg.KEY_INTERACT)
                 time.sleep(self.cfg.WAIT_ANIM_EXTRA)
                 continue
 
             if self.is_partial_relic_overlay(recognized):
-                print(f" [{index:2d}] [ENSURE] partial overlay -> press F to dismiss")
+                dbg(f" [{index:2d}] [ENSURE] partial overlay -> press F to dismiss")
                 self.keyboard.press(self.cfg.KEY_INTERACT)
-                time.sleep(max(self.cfg.WAIT_ANIM, self.cfg.POLL_INTERVAL))
+                time.sleep(max(self.cfg.RECOVER_DELAY, self.cfg.POLL_INTERVAL))
                 continue
 
-            print(f" [{index:2d}] [ENSURE] unknown/empty UI -> press F to recover")
+            dbg(f" [{index:2d}] [ENSURE] unknown/empty UI -> press F to recover")
             self.keyboard.press(self.cfg.KEY_INTERACT)
-            time.sleep(max(self.cfg.WAIT_ANIM, self.cfg.POLL_INTERVAL))
+            time.sleep(max(self.cfg.RECOVER_DELAY, self.cfg.POLL_INTERVAL))
 
         return False
     
@@ -165,12 +182,49 @@ class ForgeBot:
         has_relic_tokens = any(tok in t for tok in self.cfg.RELIC_TOKENS)
         return has_overlay_tokens and not has_relic_tokens and len(t) < 40
 
-    def capture_text(self) -> Tuple[np.ndarray, list, str]:
+    def capture_text(self, use_cache: bool = True) -> Tuple[np.ndarray, list, str]:
+        """Capture + OCR. Reuses the last result while no key was pressed:
+        tick(), ensure_relic_menu() and process_item() used to OCR the very
+        same screen three times in a row."""
+        if use_cache and self._frame_cache is not None:
+            return self._frame_cache
         image = self.capture.capture()
-        texts = self.ocr.recognize(image)
-        cleaned = [fuzzy_clean_text(t) for t in texts]
-        recognized = "".join(cleaned)
-        return image, texts, recognized
+        texts = self.ocr.recognize(image) if image is not None else []
+        recognized = "".join(fuzzy_clean_text(t) for t in texts)
+        self._frame_cache = (image, texts, recognized)
+        self._cache_settled = False
+        return self._frame_cache
+
+    def _prefetch(self, frame, texts, text):
+        """The screen found by wait_for_next_item becomes the next tick's
+        screen: no need to capture + OCR it again.
+        It is first checked for stability, so a relic caught mid-redraw is
+        never matched on half its text (re-OCR only if the image moved)."""
+        for _ in range(3):
+            if frame is None:
+                break
+            time.sleep(self.cfg.SETTLE_DELAY)
+            check = self.capture.capture()
+            if check is None or self._same_frame(check, frame):
+                break
+            check_texts = self.ocr.recognize(check)
+            check_text = "".join(fuzzy_clean_text(t) for t in check_texts)
+            frame, texts = check, check_texts
+            if check_text == text:
+                break
+            dbg(f"  [SYNC] screen still changing: '{text[:50]}' -> '{check_text[:50]}'")
+            text = check_text
+        self._frame_cache = (frame, texts, text)
+        self._prefetched = True
+        self._cache_settled = True
+        return frame, text
+
+    @staticmethod
+    def _same_frame(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> bool:
+        """Pixel-identical (or nearly) frames -> the OCR result can be reused."""
+        if a is None or b is None or a.shape != b.shape:
+            return False
+        return float(np.mean(cv2.absdiff(a, b))) < 0.5
 
     def frame_has_changed(
         self,
@@ -190,7 +244,7 @@ class ForgeBot:
         diff = cv2.absdiff(prev_gray, new_gray)
         mean_diff = np.mean(diff)
         changed = mean_diff > threshold
-        print(f"  [SYNC] frame_diff={mean_diff:.1f}>{threshold}={changed}")
+        dbg(f"  [SYNC] frame_diff={mean_diff:.1f}>{threshold}={changed}")
         return changed
 
     def is_valid_ocr_text(
@@ -223,29 +277,34 @@ class ForgeBot:
         start_time = time.time()
         empty_reads = 0
 
-        print(f"  [SYNC] Waiting next valid item (timeout={timeout}s)...")
+        dbg(f"  [SYNC] Waiting next valid item (timeout={timeout}s)...")
+        last_poll_frame, last_poll_texts = None, None
         while time.time() - start_time < timeout:
             if self.stop_signal.should_stop():
                 return None, None
 
             new_frame = self.capture.capture()
-            new_texts = self.ocr.recognize(new_frame)
+            if new_frame is None:
+                new_texts = []
+            elif self._same_frame(new_frame, last_poll_frame):
+                new_texts = last_poll_texts      # screen did not move: no new OCR
+            else:
+                new_texts = self.ocr.recognize(new_frame)
+            last_poll_frame, last_poll_texts = new_frame, new_texts
             new_text = "".join([fuzzy_clean_text(t) for t in new_texts])
             if not self.frame_has_changed(prev_frame, new_frame):
                 if len(new_text) >= self.cfg.RELIC_MIN_LEN:
                     if allow_unchanged_text:
-                        return new_frame, new_text
+                        return self._prefetch(new_frame, new_texts, new_text)
                     elif new_text != prev_text:
-                        return new_frame, new_text
+                        return self._prefetch(new_frame, new_texts, new_text)
                 time.sleep(poll_interval)
                 continue
 
-            print("  [SYNC] frame changed → OCR...")
-            new_texts = self.ocr.recognize(new_frame)
-            new_text = "".join([fuzzy_clean_text(t) for t in new_texts])
+            dbg("  [SYNC] frame changed → OCR...")
 
             if self.looks_like_action_menu(new_text):
-                print(f"  [SYNC] Overlay/action popup detected: '{new_text}' -> skip")
+                dbg(f"  [SYNC] Overlay/action popup detected: '{new_text}' -> skip")
                 time.sleep(poll_interval)
                 continue
 
@@ -254,16 +313,16 @@ class ForgeBot:
                 and new_text != prev_text    # Changement de texte
                 and not self.looks_like_action_menu(new_text)  # Pas overlay
             ):
-                print(f"  [SYNC] ✓ FALLBACK ✓ len={len(new_text)} != prev: '{new_text[:60]}...'")
-                return new_frame, new_text
+                dbg(f"  [SYNC] ✓ FALLBACK ✓ len={len(new_text)} != prev: '{new_text[:60]}...'")
+                return self._prefetch(new_frame, new_texts, new_text)
 
             if self.is_relic_menu(new_text) and self.is_valid_ocr_text(new_text, prev_text):
-                print(f"  [SYNC] ✓ Next relic menu detected: '{new_text}'")
-                return new_frame, new_text
+                dbg(f"  [SYNC] ✓ Next relic menu detected: '{new_text}'")
+                return self._prefetch(new_frame, new_texts, new_text)
 
             if self.is_main_menu(new_text):
-                print(f"  [SYNC] main menu detected during sync: '{new_text}'")
-                return new_frame, new_text
+                dbg(f"  [SYNC] main menu detected during sync: '{new_text}'")
+                return self._prefetch(new_frame, new_texts, new_text)
 
             if not self.is_valid_ocr_text(
                 new_text,
@@ -271,17 +330,17 @@ class ForgeBot:
                 self.cfg.RELIC_MIN_LEN,
                 allow_unchanged=allow_unchanged_text
             ):
-                print(f"  [SYNC] Invalid OCR: '{new_text}' (len={len(new_text)})")
+                dbg(f"  [SYNC] Invalid OCR: '{new_text}' (len={len(new_text)})")
                 empty_reads += 1
                 if empty_reads >= empty_reads_max:
-                    print(f"  [SYNC] {empty_reads} empty reads → end of list")
+                    dbg(f"  [SYNC] {empty_reads} empty reads → end of list")
                     return None, None
                 continue
 
-            print(f"  [SYNC] ✓ Valid item: '{new_text}'")
-            return new_frame, new_text
+            dbg(f"  [SYNC] ✓ Valid item: '{new_text}'")
+            return self._prefetch(new_frame, new_texts, new_text)
 
-        print("  [SYNC] timeout → end of list")
+        dbg("  [SYNC] timeout → end of list")
         return None, None
 
 # endregion
@@ -301,8 +360,13 @@ class ForgeBot:
             return False, "", None
 
         image, texts, recognized = self.capture_text()
+        if not self._cache_settled:
+            # e.g. 1st relic right after the opening animation: make sure the
+            # text is fully drawn before matching it
+            image, recognized = self._prefetch(image, texts, recognized)
+            texts = self._frame_cache[1]
 
-        print(f" [{index:2d}] OCR: '{recognized}' (len={len(recognized)})")
+        dbg(f" [{index:2d}] OCR: '{recognized}' (len={len(recognized)})")
 
         keep, info, matched_kw, blacklist_kw, has_partial, group_name, all_results = \
             self.matcher.match_detailed(texts)
@@ -317,22 +381,29 @@ class ForgeBot:
         else:
             outcome = "discard"
 
-        self.stats.record_relic(
-            batch=self.stats.rounds,
-            index=index,
-            outcome=outcome,
-            group=group_name or "",
-            all_results=all_results,
-            matched_kw=matched_kw or [],
-        )
+        self.write_audit(index, outcome, group_name, recognized, blacklist_kw)
+
+        if self.cfg.RICH_STATS:
+            self.stats.record_relic(
+                batch=self.stats.rounds,
+                index=index,
+                outcome=outcome,
+                group=group_name or "",
+                all_results=all_results,
+                matched_kw=matched_kw or [],
+            )
 
         if keep:
             self.stats.kept += 1
             self.stats.add_kept_item(texts, matched_kw, group_name)
-            print(f" [{index:2d}] ★ KEEP - {info} [KEY={self.cfg.KEY_KEEP}]")
+            print(f" [{index:2d}] ★ KEEP  {info}")
             self.keyboard.keep_item()
         else:
-            print(f" [{index:2d}] ✗ DISCARD - {info} [KEY={self.cfg.KEY_DISCARD}]")
+            if blacklist_kw:
+                print(f" [{index:2d}] ✗ blacklist: {', '.join(blacklist_kw)}")
+            else:
+                print(f" [{index:2d}] ✗")
+            dbg(f"      {info}")
 
             if has_partial and blacklist_kw:
                 self.stats.add_qualified_blacklisted(texts, matched_kw, blacklist_kw)
@@ -343,14 +414,14 @@ class ForgeBot:
 
         # For the last relic of the batch, do not wait for a "next item"
         if index >= self.cfg.BATCH_SIZE:
-            print(f" [{index:2d}] [SYNC] last relic in batch -> no next-item wait needed")
+            dbg(f" [{index:2d}] [SYNC] last relic in batch -> no next-item wait needed")
             return True, recognized, image
 
-        print(f" [{index:2d}] [SYNC] waiting for next relic...")
+        dbg(f" [{index:2d}] [SYNC] waiting for next relic...")
         next_frame, next_text = self.wait_for_next_item(image, recognized, allow_unchanged_text=False)
 
         if next_frame is None or not next_text:
-            print(f" [{index:2d}] [SYNC] next relic not observed -> action not validated")
+            dbg(f" [{index:2d}] [SYNC] next relic not observed -> action not validated")
             self.flow_context.max_failed_syncs += 1
             # if self.flow_context.max_failed_syncs >= 3 and index >= 8:
             if index >= self.cfg.BATCH_SIZE - 2:
@@ -360,7 +431,7 @@ class ForgeBot:
                 return True, recognized, image
             return False, recognized, image
 
-        print(f" [{index:2d}] [SYNC] next relic detected: '{next_text}'")
+        dbg(f" [{index:2d}] [SYNC] next relic detected: '{next_text}'")
         return True, recognized, image
 
 # region flow and state machine
@@ -376,6 +447,10 @@ class ForgeBot:
         return True
 
     def show_config_keywords(self):
+        if not self.cfg.DEBUG:
+            groups = sorted(self.cfg.KEYWORD_GROUPS.keys(), key=natural_sort_key)
+            print(f"Groups ({len(groups)}): {', '.join(groups) or 'none'}")
+            return
         print("\n" + "-" * 50)
         print("Keyword Groups")
         print("-" * 50)
@@ -407,15 +482,25 @@ class ForgeBot:
         return True
 
     def tick(self) -> bool:
+        # Fresh screen each tick, unless wait_for_next_item just read it
+        if not self._prefetched:
+            self._frame_cache = None
+        self._prefetched = False
         _, _, recognized = self.capture_text()
-        print(
+        dbg(
             f"[OCR] len={len(recognized)} grace={self.flow_context.main_menu_grace_ticks} "
             f"transition={self.flow_context.transition_ticks} pending={self.flow_context.pending_new_round} "
             f"text='{recognized[:120]}'"
         )
         decision = self.state_machine.decide(recognized, self.flow_context)
-        print(f"[STATE] state={decision.state} action={decision.action} reason={decision.reason}")
+        dbg(f"[STATE] state={decision.state} action={decision.action} reason={decision.reason}")
         self.state_machine.apply_updates(self.flow_context, decision)
+        if decision.action == Action.RESET_ROUND and self.flow_context.processed_relics > 0:
+            self.stats.rounds += 1
+            print(self.stats.batch_line())
+            # Between two batches: restart the OCR worker if PaddleOCR's leak
+            # pushed it past [OCR] max_rss_mb (weeks-long sessions)
+            self.ocr.maintenance()
         return self.flow.execute(decision.action, self.flow_context)
 
     def run(self):
@@ -457,6 +542,8 @@ class ForgeBot:
 
         with open(self.log_path, "w", encoding="utf-8") as f:
             f.write("[SESSION START]\n\n")
+        self.audit_path = os.path.join(script_dir, f"hajiwo_relics_{timestamp}.tsv")
+        self._audit_bytes = 0   # header written with the first relic
 
         try:
             while not self.stop_signal.should_stop():
@@ -466,6 +553,10 @@ class ForgeBot:
                         time.sleep(1)
 
                     self.flush_stats_if_needed(force=False)
+
+                except GameWindowLost as e:
+                    print(f"\n[STOP] {e} — the game is closed or crashed, stopping the bot")
+                    break
 
                 except RuntimeError as e:
                     print(f"[WARNING] Transient runtime error in tick: {e} — retrying in 1s")
@@ -480,7 +571,10 @@ class ForgeBot:
             traceback.print_exc()
 
         finally:
+            # A second Ctrl+C must not abort the cleanup half-way
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             self.stop_signal.event.set()
+            self.release_inputs()
             time.sleep(0.2)
 
             if self.locker:
@@ -498,7 +592,8 @@ class ForgeBot:
                 print(f"[WARNING] Failed to flush record buffer: {e}")
 
             self.stats.print_report()
-            self.stats.print_rich_summary()
+            if self.cfg.RICH_STATS:
+                self.stats.print_rich_summary()
 
             if self.log_path:
                 try:
@@ -507,9 +602,11 @@ class ForgeBot:
                         header_suffix="final summary",
                         include_details=True,
                         clear_after_write=False,
+                        final=True,
                     )
-                    self.stats.save_rich_summary(self.log_path)   # ← NOUVEAU : append dans le même fichier
-                    print(f"\n[OK] {self.cfg.lang.get('log_saved')}: {self.log_path}")
+                    if self.cfg.RICH_STATS:
+                        self.stats.save_rich_summary(self.log_path)
+                    print(f"[OK] {self.cfg.lang.get('log_saved')}: {self.log_path}")
                 except Exception as e:
                     print(f"[WARNING] Failed to append final summary: {e}")
 
@@ -519,10 +616,51 @@ class ForgeBot:
             except Exception as e:
                 print(f"[WARNING] Failed to cleanup temp stats file: {e}")
 
-            try:
-                self.capture.close()
-            except Exception:
-                pass
+            self.shutdown()
+
+    def write_audit(self, index, outcome, group_name, recognized, blacklist_kw):
+        """Append one TSV line per relic (re-checkable with audit_relics.py)."""
+        if not self.audit_path:
+            return
+        line = (f"{self.stats.rounds + 1}\t{index}\t{outcome}\t{group_name or ''}\t"
+                f"{','.join(blacklist_kw or [])}\t{recognized}\n")
+        try:
+            # Rotation: weeks-long sessions must not fill the disk.
+            # Past audit_max_mb the file becomes <name>.1.tsv (previous .1 dropped).
+            if self._audit_bytes > self.cfg.AUDIT_MAX_MB * 1024 * 1024:
+                os.replace(self.audit_path, self.audit_path[:-4] + ".1.tsv")
+                self._audit_bytes = 0
+            if self._audit_bytes == 0:
+                header = "batch\tindex\toutcome\tgroup\tblacklist\tocr_text\n"
+                if not os.path.exists(self.audit_path) or os.path.getsize(self.audit_path) == 0:
+                    line = header + line
+            with open(self.audit_path, "a", encoding="utf-8") as f:
+                f.write(line)
+            self._audit_bytes += len(line.encode("utf-8"))
+        except Exception as e:
+            dbg(f"[AUDIT] write failed: {e}")
+
+    def release_inputs(self):
+        """Release every key/modifier the bot may hold."""
+        try:
+            self.keyboard.release_all()
+        except Exception as e:
+            print(f"[WARNING] Failed to release keys: {e}")
+
+    def shutdown(self):
+        """Stop the capture helper and release keys. Safe to call twice."""
+        if getattr(self, "_shut_down", False):
+            return
+        self._shut_down = True
+        self.release_inputs()
+        try:
+            self.capture.close()
+        except Exception as e:
+            print(f"[WARNING] Failed to stop screen capture: {e}")
+        try:
+            self.ocr.close()
+        except Exception as e:
+            print(f"[WARNING] Failed to stop OCR worker: {e}")
 
     def debug_screenshot(self):
         img = self.capture.capture()
@@ -544,23 +682,38 @@ class ForgeBot:
 # endregion
 # region main
 
+def _sigterm_to_interrupt(signum, frame):
+    # kill / closing the terminal -> same clean shutdown path as Ctrl+C
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _sigterm_to_interrupt)
+    signal.signal(signal.SIGHUP, _sigterm_to_interrupt)
     bot = None
     try:
         bot = ForgeBot()
         bot.run()
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED]")
     except Exception as e:
         print(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
     finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if bot is not None:
+            bot.shutdown()
         print("\n" + "=" * 50)
         if bot and bot.cfg and bot.cfg.lang:
             print(bot.cfg.lang.get("program_done"))
         else:
             print("Program completed")
         print("=" * 50)
-        input("Press Enter to exit...")
+        try:
+            input("Press Enter to exit...")
+        except (EOFError, KeyboardInterrupt):
+            pass
 
 
 # endregion

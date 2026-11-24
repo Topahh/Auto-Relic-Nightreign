@@ -26,6 +26,8 @@ class Action(str, Enum):
     EXIT_RELIC_MENU = "EXIT_RELIC_MENU"
     RECOVER_TO_RELIC_MENU = "RECOVER_TO_RELIC_MENU"
     RESET_ROUND = "RESET_ROUND"
+    RETRY_CONFIRM = "RETRY_CONFIRM"
+    RETRY_SKIP = "RETRY_SKIP"
 
 
 @dataclass
@@ -57,6 +59,15 @@ class FlowContext:
     empty_ticks: int = 0
     transition_ticks: int = 0
     main_menu_grace_ticks: int = 0
+    # Ticks spent in a non-progressing WAIT (flatstone 10/10 wait, main menu
+    # during an active round, unknown before purchase). Bounds those WAITs.
+    stall_ticks: int = 0
+    # Wall-clock time of the last exit / F2 press (set by ForgeFlow): retries
+    # are spaced in SECONDS, not ticks — faster ticks must not mean more presses.
+    last_exit_time: float = 0.0
+    last_choose_time: float = 0.0
+    last_confirm_time: float = 0.0
+    last_skip_time: float = 0.0
 
     def reset_round(self) -> None:
         self.processed_relics = 0
@@ -73,6 +84,11 @@ class FlowContext:
         self.last_action = None
         self.empty_ticks = 0
         self.transition_ticks = 0
+        self.stall_ticks = 0
+        self.last_exit_time = 0.0
+        self.last_choose_time = 0.0
+        self.last_confirm_time = 0.0
+        self.last_skip_time = 0.0
 
 @dataclass
 class TickDecision:
@@ -83,6 +99,12 @@ class TickDecision:
 
 # endregion
 # region definition and helper methods of the state machine
+
+# Stall limits (in ticks) for WAITs that would otherwise never end
+F2_RETRY_TICKS = 8          # 10/10 not seen after F2 -> send F2 again
+MAIN_MENU_STALL_TICKS = 10  # real main menu seen during an active round -> restart round
+UNKNOWN_STALL_TICKS = 15    # unknown screen before purchase -> drop round flags
+
 
 class ForgeBotStateMachine:
     """
@@ -233,6 +255,7 @@ class ForgeBotStateMachine:
 
         updates: Dict[str, Any] = {
             "last_state": state,
+            "stall_ticks": 0,
         }
 
         # Track empty OCR
@@ -426,20 +449,28 @@ class ForgeBotStateMachine:
             # 2) Attendre confirmation visuelle du 10/10
             if not ctx.choose_10_done:
                 if batch_10_visible:
+                    # 10/10 is on screen in this very frame: confirm right away
+                    # (falls through to step 3 instead of spending one more tick)
                     updates["choose_10_done"] = True
+                else:
+                    stall = ctx.stall_ticks + 1
+                    if stall >= F2_RETRY_TICKS:
+                        # F2 probably not registered: allow sending it again
+                        # (ForgeFlow still spaces F2 presses by f2_retry_delay)
+                        updates["batch_select_requested"] = False
+                        return TickDecision(
+                            state=state,
+                            action=Action.WAIT,
+                            reason=f"10/10 not seen after {stall} ticks, will resend F2",
+                            updates=updates,
+                        )
+                    updates["stall_ticks"] = stall
                     return TickDecision(
                         state=state,
                         action=Action.WAIT,
-                        reason="Batch 10 visually confirmed (10/10 detected)",
+                        reason="Waiting for visual confirmation of batch 10 after F2",
                         updates=updates,
                     )
-
-                return TickDecision(
-                    state=state,
-                    action=Action.WAIT,
-                    reason="Waiting for visual confirmation of batch 10 after F2",
-                    updates=updates,
-                )
 
             # 3) Confirmer l'achat
             if not ctx.confirm_done:
@@ -453,12 +484,14 @@ class ForgeBotStateMachine:
                     updates=updates,
                 )
 
-            # 4) Si on est toujours là, avancer
+            # 4) Purchase screen still visible after confirm: never press F on it
+            #    right away (it could buy again). ForgeFlow re-sends the confirm
+            #    only if the screen stays frozen for confirm_retry_delay seconds.
             updates["transition_started"] = True
             return TickDecision(
                 state=state,
-                action=Action.SKIP_TO_RELIC_MENU,
-                reason="Still in flatstone after confirm, send skip/confirm",
+                action=Action.RETRY_CONFIRM,
+                reason="Still on purchase screen after confirm, wait (time-guarded confirm retry)",
                 updates=updates,
             )
 
@@ -479,8 +512,8 @@ class ForgeBotStateMachine:
 
             return TickDecision(
                 state=state,
-                action=Action.WAIT,
-                reason="Transition in progress, wait for next stable menu",
+                action=Action.RETRY_SKIP,
+                reason="Transition in progress, wait (time-guarded skip retry)",
                 updates=updates,
             )
 
@@ -500,9 +533,14 @@ class ForgeBotStateMachine:
         # ==========================================================
         if state == UIState.MAIN_MENU:
             updates["recovering"] = False
-            updates["transition_started"] = False
-            updates["skip_sent"] = False
             updates["transition_ticks"] = 0
+            # Right after the purchase the game briefly shows the flatstone
+            # description ("...purchase to reveal its precious gift"), which reads
+            # as the main menu. Keep the transition flags: the black screen that
+            # follows is the opening animation and must be skipped at once.
+            if not (ctx.confirm_done and ctx.processed_relics == 0):
+                updates["transition_started"] = False
+                updates["skip_sent"] = False
 
             if ctx.pending_new_round:
                 updates["pending_new_round"] = False
@@ -523,6 +561,26 @@ class ForgeBotStateMachine:
                     updates=updates,
                 )
 
+            # Strong main-menu evidence (not grace-based) while a round is active
+            # and no batch completed: the round was lost. Restart it after a while.
+            strong_main = (
+                tick.main_menu_token_hits >= 2
+                and tick.flatstone_token_hits == 0
+                and tick.relic_token_hits < 2
+            )
+            if strong_main:
+                stall = ctx.stall_ticks + 1
+                if stall >= MAIN_MENU_STALL_TICKS:
+                    updates["pending_new_round"] = True
+                    updates["round_active"] = False
+                    return TickDecision(
+                        state=state,
+                        action=Action.RESET_ROUND,
+                        reason=f"Main menu stable for {stall} ticks during active round, restart round",
+                        updates=updates,
+                    )
+                updates["stall_ticks"] = stall
+
             return TickDecision(
                 state=state,
                 action=Action.WAIT,
@@ -533,6 +591,28 @@ class ForgeBotStateMachine:
         # ==========================================================
         # UNKNOWN
         # ==========================================================
+        purchase_done = ctx.confirm_done or ctx.processed_relics > 0
+        if ctx.round_active and not purchase_done:
+            # Before purchase, recovery presses F, which could buy a single
+            # flatstone in the purchase menu. Wait instead, bounded.
+            stall = ctx.stall_ticks + 1
+            if stall >= UNKNOWN_STALL_TICKS:
+                updates["pending_new_round"] = True
+                updates["round_active"] = False
+                return TickDecision(
+                    state=state,
+                    action=Action.RESET_ROUND,
+                    reason=f"Unknown for {stall} ticks before purchase, reset and wait for main menu",
+                    updates=updates,
+                )
+            updates["stall_ticks"] = stall
+            return TickDecision(
+                state=state,
+                action=Action.WAIT,
+                reason="Unknown state before purchase, wait (no recovery key)",
+                updates=updates,
+            )
+
         if ctx.round_active and ctx.processed_relics < ctx.batch_size:
             updates["recovering"] = True
             return TickDecision(

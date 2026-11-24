@@ -12,6 +12,7 @@
 
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any, Optional
+from utils.log import dbg
 
 from config.settings import Config
 from utils.text import fuzzy_clean_text, natural_sort_key
@@ -186,8 +187,7 @@ class ItemMatcher:
             group_config = self.cfg.KEYWORD_GROUPS[group_name]
             result = self._match_group(group_name, group_config, merged_text)
 
-            # Always print the per-group debug line
-            print(f"   [MATCH] {result.debug_str()}")
+            dbg(f"   [MATCH] {result.debug_str()}")
 
             if result.keep:
                 all_matched = result.a_matched + result.b_matched
@@ -246,7 +246,7 @@ class ItemMatcher:
             result = self._match_group(group_name, group_config, merged_text)
             all_results[group_name] = result
 
-            print(f"   [MATCH] {result.debug_str()}")
+            dbg(f"   [MATCH] {result.debug_str()}")
 
             if result.keep:
                 all_matched = result.a_matched + result.b_matched

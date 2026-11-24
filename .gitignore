@@ -1,0 +1,40 @@
+# ── Configuration personnelle ────────────────────────────────────────────
+# Mots-clés, région d'écran, timings : propres à chaque joueur / écran
+hajiwo.ini
+hajiwo.ini.bak*
+*.bak
+
+# ── Analyse méta & fonctionnement du jeu (aide pour remplir hajiwo.ini) ──
+# Notes, rapports, tableurs, liste d'effets, filtres de travail
+analyse_meta/
+context.txt
+
+# ── Sorties d'exécution ──────────────────────────────────────────────────
+# Logs de session, fichiers d'audit (.tsv), captures de debug
+debug_captures/
+*.log
+
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ── Scripts personnels / de test ─────────────────────────────────────────
+ScreenCoordinate.py
+test_wayland.py
+stop_hajiwo.sh
+
+# ── Installeurs & binaires ───────────────────────────────────────────────
+*.exe
+*.msi
+
+# ── Éditeurs & système ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.directory
+.DS_Store
+Thumbs.db

@@ -22,6 +22,12 @@ from engine.platform_detect import is_windows
 # ------------------------------------------------------------------
 
 
+class GameWindowLost(Exception):
+    """The game window disappeared (crash / closed): stop instead of typing
+    keys into whatever window has the focus. Not a RuntimeError on purpose:
+    the main loop retries RuntimeErrors forever."""
+
+
 class KeyboardController:
     """
     Sends keystrokes to the game window.
@@ -72,6 +78,7 @@ class KeyboardController:
         self.press              = self._press_linux
         self._focus_game        = self._focus_game_linux
         self.warmup_permissions = self._warmup_linux
+        self.release_all        = self._release_all_linux
 
     def _init_windows(self):
         """Set up the pydirectinput backend and bind methods to Windows implementations."""
@@ -89,6 +96,7 @@ class KeyboardController:
         self.press              = self._press_windows
         self._focus_game        = self._focus_game_windows
         self.warmup_permissions = self._warmup_windows
+        self.release_all        = self._release_all_windows
 
 
     # ------------------------------------------------------------------
@@ -129,10 +137,7 @@ class KeyboardController:
         """Focus the game window before sending any input.
         Delay uses cfg.FOCUS_DELAY (from [Timing] focus_delay)."""
         if self._window_id:
-            subprocess.run(
-                ['xdotool', 'windowfocus', '--sync', self._window_id],
-                capture_output=True, env=self._env
-            )
+            self._xdo('windowfocus', '--sync', self._window_id)
             time.sleep(self.cfg.FOCUS_DELAY)
 
     def _warmup_linux(self):
@@ -142,10 +147,7 @@ class KeyboardController:
         """
         self._focus_game()
         time.sleep(self.cfg.WARMUP_DELAY)
-        subprocess.run(
-            ['xdotool', 'key', '--clearmodifiers', 'Shift_L'],
-            env=self._env, capture_output=True
-        )
+        self._xdo('key', 'Shift_L')
         time.sleep(self.cfg.WARMUP_DELAY)
 
 
@@ -163,11 +165,47 @@ class KeyboardController:
         after  = delay if delay is not None else self.cfg.KEY_INTERVAL
         hold_t = hold  if hold  is not None else self.cfg.KEY_HOLD
 
-        self._focus_game()
-        subprocess.run(['xdotool', 'keydown', '--clearmodifiers', xkey], env=self._env, capture_output=True)
-        time.sleep(hold_t)
-        subprocess.run(['xdotool', 'keyup', xkey], env=self._env, capture_output=True)
+        # One xdotool process for focus + down + hold + up (was 3 processes
+        # + a Python sleep). No --clearmodifiers: it re-pressed the modifiers
+        # you physically held (Ctrl during Ctrl+C), leaving Ctrl "stuck".
+        focus = (['windowfocus', '--sync', self._window_id, 'sleep', str(self.cfg.FOCUS_DELAY)]
+                 if self._window_id else [])
+        try:
+            r = self._xdo(*focus, 'keydown', xkey, 'sleep', str(hold_t), 'keyup', xkey)
+            if r.returncode != 0 and self._window_id and not self._window_exists():
+                # xdotool aborts the chain at the failed windowfocus: no key was sent
+                raise GameWindowLost(f"game window {self._window_id} no longer exists")
+        except GameWindowLost:
+            raise
+        except BaseException:
+            # Interrupted mid-press (Ctrl+C): make sure the key goes back up
+            self._xdo('keyup', xkey)
+            raise
         time.sleep(after)
+
+    def _xdo(self, *args):
+        """Run xdotool in its own session so a terminal Ctrl+C cannot kill it
+        halfway through (which would leave a key pressed)."""
+        return subprocess.run(
+            ['xdotool', *args], env=self._env, capture_output=True,
+            start_new_session=True,
+        )
+
+    def _window_exists(self) -> bool:
+        return self._xdo('getwindowname', self._window_id).returncode == 0
+
+    _RELEASE_ON_EXIT_LINUX = (
+        'Control_L', 'Control_R', 'Shift_L', 'Shift_R', 'Alt_L', 'Alt_R',
+        'Super_L', 'Super_R', 'ISO_Level3_Shift',
+    )
+
+    def _release_all_linux(self):
+        keys = set(self._RELEASE_ON_EXIT_LINUX)
+        for k in (self.cfg.KEY_INTERACT, self.cfg.KEY_DOWN, self.cfg.KEY_RIGHT,
+                  self.cfg.KEY_KEEP, self.cfg.KEY_DISCARD, self.cfg.KEY_CHOSE_10_RELICS):
+            if k:
+                keys.add(self._KEY_MAP_XDOTOOL.get(k.lower(), k))
+        self._xdo('keyup', *sorted(keys))
 
 
     # ------------------------------------------------------------------
@@ -196,9 +234,23 @@ class KeyboardController:
         hold_t = hold  if hold  is not None else self.cfg.KEY_HOLD
 
         self._pdi.keyDown(mapped)
-        time.sleep(hold_t)
-        self._pdi.keyUp(mapped)
+        try:
+            time.sleep(hold_t)
+        finally:
+            self._pdi.keyUp(mapped)
         time.sleep(after)
+
+    def _release_all_windows(self):
+        keys = {'ctrl', 'shift', 'alt', 'win'}
+        for k in (self.cfg.KEY_INTERACT, self.cfg.KEY_DOWN, self.cfg.KEY_RIGHT,
+                  self.cfg.KEY_KEEP, self.cfg.KEY_DISCARD, self.cfg.KEY_CHOSE_10_RELICS):
+            if k:
+                keys.add(self._KEY_MAP_PDI.get(k.lower(), k))
+        for k in keys:
+            try:
+                self._pdi.keyUp(k)
+            except Exception:
+                pass
 
 
     # ------------------------------------------------------------------
@@ -213,6 +265,10 @@ class KeyboardController:
         raise NotImplementedError("Backend not initialized")
 
     def warmup_permissions(self):
+        raise NotImplementedError("Backend not initialized")
+
+    def release_all(self):
+        """Release modifiers and every bot key (called on shutdown)."""
         raise NotImplementedError("Backend not initialized")
 
 

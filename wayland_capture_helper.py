@@ -2,6 +2,7 @@
 
 import os
 import sys
+import signal
 import time
 import secrets
 
@@ -257,7 +258,15 @@ class PersistentScreenCast:
             self.session_handle = None
 
 
+def _exit_on_signal(signum, frame):
+    # Turn SIGTERM/SIGHUP into a normal exit so the finally: sc.close() runs
+    # and the ScreenCast session is released instead of left running.
+    raise SystemExit(0)
+
+
 def main():
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGHUP, _exit_on_signal)
     sc = PersistentScreenCast()
 
     try:
@@ -275,10 +284,20 @@ def main():
                 break
 
             if line.startswith("CAPTURE "):
-                out_path = line[len("CAPTURE "):].strip()
+                # CAPTURE <path> [left top width height]
+                parts = line[len("CAPTURE "):].split()
+                out_path = parts[0] if parts else ""
                 try:
                     out_path = os.path.abspath(out_path)
                     frame = sc.capture_frame(retries=5, timeout_s=3)
+                    if len(parts) == 5:
+                        left, top, width, height = (int(v) for v in parts[1:5])
+                        h, w = frame.shape[:2]
+                        x1, y1 = max(0, left), max(0, top)
+                        x2, y2 = min(w, left + width), min(h, top + height)
+                        if x1 >= x2 or y1 >= y2:
+                            raise RuntimeError(f"Crop {parts[1:5]} outside {w}x{h} frame")
+                        frame = frame[y1:y2, x1:x2]
                     ok = cv2.imwrite(out_path, frame)
                     if not ok:
                         print(f"ERR Failed to write PNG: {out_path}", flush=True)

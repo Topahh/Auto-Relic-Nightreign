@@ -9,6 +9,7 @@ from configparser import ConfigParser
 from typing import Tuple
 
 from utils.text import fuzzy_clean_text, natural_sort_key
+from utils.log import set_debug
 
 # region Language
 # ==================== Multi-language support ====================
@@ -144,6 +145,15 @@ class Config:
 
     # OCR engine
     OCR_LANG: str = "en"
+    OCR_DOC_PREPROCESS: bool = False   # PaddleOCR doc orientation + UVDoc unwarping (slow, meant for photos)
+    OCR_MAX_RSS_MB: float = 2600.0     # OCR worker restarted between batches above this RAM (PaddleOCR leaks)
+    WAIT_MENU: float = 0.30            # wait after ENTER_FLATSTONE / CHOOSE_BATCH_SIZE (next ticks re-check the screen)
+    SETTLE_DELAY: float = 0.05         # pause before the stability check of a newly detected relic
+    EXIT_RETRY_DELAY: float = 2.0      # min seconds between two "exit relic menu" F presses
+    F2_RETRY_DELAY: float = 3.0        # min seconds between two F2 (batch of 10) presses
+    CONFIRM_RETRY_DELAY: float = 3.0   # purchase screen still visible this long after confirm -> re-press F
+    RECOVER_DELAY: float = 1.0         # spacing of the F presses used to recover from an unknown screen
+    SKIP_RETRY_DELAY: float = 1.0      # opening animation still visible this long after the skip -> press again
 
     # Language (loaded last)
     lang: Language = None
@@ -151,6 +161,11 @@ class Config:
     # validation length for OCR menu recognition
     MIN_TEXT_LEN: int = 40
     RELIC_MIN_LEN: int = 65
+
+    # [Logging]
+    DEBUG: bool = False        # verbose diagnostic output (SYNC / MATCH / STATE...)
+    RICH_STATS: bool = False   # extended end-of-session analysis
+    AUDIT_MAX_MB: float = 50.0 # audit TSV rotated past this size (keeps 1 previous file)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -197,6 +212,13 @@ class Config:
             self.KEY_HOLD          = config_file.getfloat('Timing', 'key_hold',            fallback=self.KEY_HOLD)
             self.KEY_INTERVAL      = config_file.getfloat('Timing', 'key_interval',        fallback=self.KEY_INTERVAL)
             self.WAIT_ANIM         = config_file.getfloat('Timing', 'wait_anim',           fallback=self.WAIT_ANIM)
+            self.WAIT_MENU         = config_file.getfloat('Timing', 'wait_menu',           fallback=self.WAIT_MENU)
+            self.SETTLE_DELAY      = config_file.getfloat('Timing', 'settle_delay',        fallback=self.SETTLE_DELAY)
+            self.EXIT_RETRY_DELAY  = config_file.getfloat('Timing', 'exit_retry_delay',    fallback=self.EXIT_RETRY_DELAY)
+            self.F2_RETRY_DELAY    = config_file.getfloat('Timing', 'f2_retry_delay',      fallback=self.F2_RETRY_DELAY)
+            self.CONFIRM_RETRY_DELAY = config_file.getfloat('Timing', 'confirm_retry_delay', fallback=self.CONFIRM_RETRY_DELAY)
+            self.RECOVER_DELAY     = config_file.getfloat('Timing', 'recover_delay',       fallback=self.RECOVER_DELAY)
+            self.SKIP_RETRY_DELAY  = config_file.getfloat('Timing', 'skip_retry_delay',    fallback=self.SKIP_RETRY_DELAY)
             self.WAIT_ANIM_EXTRA   = config_file.getfloat('Timing', 'wait_anim_extra',     fallback=self.WAIT_ANIM_EXTRA)  
             self.BATCH_SIZE        = config_file.getint  ('Timing', 'batch_size',          fallback=self.BATCH_SIZE)
             self.FORGE_MENU_SLEEP  = config_file.getfloat('Timing', 'forge_menu_sleep',    fallback=self.FORGE_MENU_SLEEP)
@@ -214,6 +236,8 @@ class Config:
         # --------------------------------------------------------------
         if config_file.has_section('OCR'):
             self.OCR_LANG = config_file.get('OCR', 'lang', fallback=self.OCR_LANG)
+            self.OCR_DOC_PREPROCESS = config_file.getboolean('OCR', 'doc_preprocess', fallback=False)
+            self.OCR_MAX_RSS_MB = config_file.getfloat('OCR', 'max_rss_mb', fallback=self.OCR_MAX_RSS_MB)
 
         # --------------------------------------------------------------
         # [Keywords] — relic keyword groups
@@ -289,4 +313,13 @@ class Config:
         else:
             self.MIN_TEXT_LEN = 40
             self.RELIC_MIN_LEN = 65
+
+        # --------------------------------------------------------------
+        # [Logging]
+        # --------------------------------------------------------------
+        if config_file.has_section('Logging'):
+            self.DEBUG      = config_file.getboolean('Logging', 'debug',      fallback=False)
+            self.RICH_STATS = config_file.getboolean('Logging', 'rich_stats', fallback=False)
+            self.AUDIT_MAX_MB = config_file.getfloat('Logging', 'audit_max_mb', fallback=self.AUDIT_MAX_MB)
+        set_debug(self.DEBUG)
 # endregion

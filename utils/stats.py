@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from config.settings import Language
 from utils.text import fuzzy_clean_text
+from utils import log
 
 if TYPE_CHECKING:
     from engine.matcher import MatchResult
@@ -99,6 +100,15 @@ class Statistics:
         self.scanned = 0
         self.kept = 0
 
+        # Compteurs cumulés (jamais vidés)
+        self.blacklisted = 0
+        self.partial = 0
+        self.kept_by_group: Dict[str, int] = defaultdict(int)
+        self.blacklist_reasons: Dict[str, int] = defaultdict(int)
+        self.kept_summary: List[str] = []   # "[E1] kw1, kw2" — toute la session
+        self._batch_start_scanned = 0
+        self._batch_start_kept = 0
+
         self.kept_items: list = []
         self.qualified_but_blacklisted: list = []
         self.partial_matches: list = []
@@ -111,6 +121,17 @@ class Statistics:
         self.temp_path     = temp_path
         self._record_buffer: List[RelicRecord] = []
         self._records_written = 0
+        # temp_path is in /tmp = RAM (tmpfs): cap it for weeks-long sessions
+        self.max_records = 200_000      # ~20 MB
+        self._records_capped = False
+
+        # Drop leftovers from a previous session that ended without cleanup,
+        # otherwise they would be counted in this session's summary.
+        try:
+            if os.path.exists(self.temp_path):
+                os.remove(self.temp_path)
+        except OSError as e:
+            print(f"[STATS][WARN] Could not remove stale temp file: {e}")
 
     # ------------------------------------------------------------------
     # Helpers listes OCR (inchangé)
@@ -138,14 +159,30 @@ class Statistics:
     def add_kept_item(self, texts, keywords, group_name):
         self.kept_items.append((texts, keywords, group_name))
         self._trim_list(self.kept_items)
+        self.kept_by_group[group_name or "?"] += 1
+        self.kept_summary.append(f"[{group_name}] {', '.join(keywords)}")
+        self._trim_list(self.kept_summary)
 
     def add_qualified_blacklisted(self, texts, matched_keywords, blacklist_keywords):
+        self.blacklisted += 1
+        for kw in blacklist_keywords:
+            self.blacklist_reasons[kw] += 1
         self.qualified_but_blacklisted.append((texts, matched_keywords, blacklist_keywords))
         self._trim_list(self.qualified_but_blacklisted)
 
     def add_partial_match(self, texts, matched_keywords, reason, group_name):
+        self.partial += 1
         self.partial_matches.append((texts, matched_keywords, reason, group_name))
         self._trim_list(self.partial_matches)
+
+    def batch_line(self) -> str:
+        """Une ligne de résumé à la fin de chaque lot de reliques."""
+        scanned = self.scanned - self._batch_start_scanned
+        kept = self.kept - self._batch_start_kept
+        self._batch_start_scanned = self.scanned
+        self._batch_start_kept = self.kept
+        return (f"── Batch {self.rounds} : {kept}/{scanned} kept"
+                f"  | total {self.kept}/{self.scanned} ──")
 
     # ------------------------------------------------------------------
     # NOUVEAU — enregistrement structuré léger
@@ -166,6 +203,12 @@ class Statistics:
         Appeler après chaque décision keep/discard dans process_item().
         all_results vient du 7e élément de matcher.match_detailed().
         """
+        if self._records_written + len(self._record_buffer) >= self.max_records:
+            if not self._records_capped:
+                self._records_capped = True
+                print(f"[STATS] rich_stats: {self.max_records:,} relics recorded, "
+                      f"recording stopped to protect RAM (/tmp)")
+            return
         profiles = _profiles_from_results(all_results)
         rec = RelicRecord(
             batch=batch, index=index, outcome=outcome,
@@ -186,7 +229,7 @@ class Statistics:
                 for rec in self._record_buffer:
                     f.write(rec.to_json_line() + "\n")
             self._records_written += len(self._record_buffer)
-            print(
+            log.dbg(
                 f"[STATS] Flushed {len(self._record_buffer)} records "
                 f"(total on disk={self._records_written}) → {self.temp_path}"
             )
@@ -204,7 +247,7 @@ class Statistics:
         try:
             if os.path.exists(self.temp_path):
                 os.remove(self.temp_path)
-                print(f"[STATS] Temp file deleted: {self.temp_path}")
+                log.dbg(f"[STATS] Temp file deleted: {self.temp_path}")
         except Exception as e:
             print(f"[STATS][ERROR] Cleanup failed: {e}")
 
@@ -425,7 +468,7 @@ class Statistics:
         try:
             with open(filepath, 'a', encoding='utf-8') as f:
                 f.write("\n".join(self._build_rich_summary()) + "\n\n")
-            print(f"[STATS] Rich summary appended to: {filepath}")
+            log.dbg(f"[STATS] Rich summary appended to: {filepath}")
         except Exception as e:
             print(f"[STATS][ERROR] Failed to write rich summary: {e}")
 
@@ -437,71 +480,46 @@ class Statistics:
         self,
         include_details: bool = True,
         header_suffix: Optional[str] = None,
+        final: bool = False,
     ) -> List[str]:
+        """Rapport compact. Les listes partial / blacklisted détaillées
+        ne sont écrites qu'en mode debug ([Logging] debug = true)."""
         lang = self.lang
-        lines = []
-        lines.append("=" * 40)
         title = lang.get('stats_title')
         if header_suffix:
             title = f"{title} - {header_suffix}"
-        lines.append(title)
-        lines.append("=" * 40)
-        lines.append(f"{lang.get('total_rounds')}: {self.rounds}")
-        lines.append(f"{lang.get('total_scanned')}: {self.scanned}")
-        lines.append(f"{lang.get('total_kept')}: {self.kept}")
+        rate = (self.kept / self.scanned * 100) if self.scanned else 0.0
+        lines = [
+            f"── {title} ──",
+            f"{lang.get('total_rounds')} {self.rounds} | {lang.get('total_scanned')} {self.scanned}"
+            f" | {lang.get('total_kept')} {self.kept} ({rate:.1f}%)"
+            f" | blacklist {self.blacklisted} | partial {self.partial}",
+        ]
+        if self.kept_by_group:
+            lines.append("Kept by group: " + ", ".join(
+                f"{g} {n}" for g, n in sorted(self.kept_by_group.items(), key=lambda x: -x[1])))
+        if self.blacklist_reasons:
+            top = sorted(self.blacklist_reasons.items(), key=lambda x: -x[1])[:5]
+            lines.append("Top blacklist: " + ", ".join(f"{k} {n}" for k, n in top))
 
-        if self.scanned > 0:
-            rate = (self.kept / self.scanned) * 100
-            lines.append(f"{lang.get('keep_rate')}: {rate:.2f}%")
+        if include_details:
+            # Final : toute la session ; snapshot : seulement depuis le dernier snapshot
+            kept_lines = self.kept_summary if final else [
+                f"[{g}] {', '.join(kw)}" for _, kw, g in self.kept_items]
+            if kept_lines:
+                lines.append(f"{lang.get('kept_items')}:")
+                lines += [f"  {i}. {k}" for i, k in enumerate(kept_lines, 1)]
 
-        if not include_details:
-            lines.append("=" * 40)
-            return lines
+            if log.DEBUG:
+                for idx, (texts, matched_kw, reason, group_name) in enumerate(self.partial_matches, 1):
+                    lines.append(f"  partial {idx}. [{group_name}] {reason}")
+                for idx, (texts, matched_kw, blacklist_kw) in enumerate(self.qualified_but_blacklisted, 1):
+                    lines.append(f"  blacklisted {idx}. {', '.join(matched_kw)} -> (({', '.join(blacklist_kw)}))")
 
-        if self.kept_items:
-            lines.append(f"\n{lang.get('kept_items')}:")
-            for idx, (texts, keywords, group_name) in enumerate(self.kept_items, 1):
-                cleaned_texts = [fuzzy_clean_text(t) for t in texts]
-                joined = "".join(cleaned_texts) if cleaned_texts else "(none)"
-                for kw in keywords:
-                    joined = joined.replace(kw, f"[[{kw}]]")
-                lines.append(f"  {idx}. [{group_name}] {joined}")
-
-        if self.partial_matches:
-            lines.append(
-                f"\n[PARTIAL MATCHES — {len(self.partial_matches)} item(s) "
-                f"with at least one primary keyword found but group not validated]"
-            )
-            for idx, (texts, matched_kw, reason, group_name) in enumerate(self.partial_matches, 1):
-                cleaned_texts = [fuzzy_clean_text(t) for t in texts]
-                joined = "".join(cleaned_texts) if cleaned_texts else "(none)"
-                for kw in matched_kw:
-                    joined = joined.replace(kw, f"[[{kw}]]")
-                preview = joined[:150] + ("..." if len(joined) > 150 else "")
-                lines.append(f"  {idx}. [{group_name}] {reason}")
-                lines.append(f"     {preview}")
-
-        if self.qualified_but_blacklisted:
-            lines.append(
-                f"\n{lang.get('blacklist_items')}: "
-                f"{len(self.qualified_but_blacklisted)}{lang.get('件')}"
-            )
-            for idx, (texts, matched_kw, blacklist_kw) in enumerate(
-                self.qualified_but_blacklisted, 1
-            ):
-                cleaned_texts = [fuzzy_clean_text(t) for t in texts]
-                joined = "".join(cleaned_texts) if cleaned_texts else "(none)"
-                for kw in matched_kw:
-                    joined = joined.replace(kw, f"[[{kw}]]")
-                for kw in blacklist_kw:
-                    joined = joined.replace(kw, f"(({kw}))")
-                lines.append(f"  {idx}. {joined}")
-
-        lines.append("=" * 40)
         return lines
 
     def print_report(self):
-        print("\n" + "\n".join(self._build_report_lines()))
+        print("\n" + "\n".join(self._build_report_lines(header_suffix="session", final=True)))
 
     def save_log(self, filepath: str):
         lang = self.lang
@@ -518,6 +536,7 @@ class Statistics:
         header_suffix: Optional[str] = None,
         include_details: bool = True,
         clear_after_write: bool = False,
+        final: bool = False,
     ):
         try:
             with open(filepath, 'a', encoding='utf-8') as f:
@@ -525,12 +544,13 @@ class Statistics:
                     "\n".join(self._build_report_lines(
                         include_details=include_details,
                         header_suffix=header_suffix,
+                        final=final,
                     )) + "\n\n"
                 )
             self.flush_count += 1
-            print(f"[STATS] Snapshot appended to: {filepath}")
+            log.dbg(f"[STATS] Snapshot appended to: {filepath}")
             if clear_after_write:
                 self.clear_detailed_lists()
-                print("[STATS] Detailed lists cleared from memory after flush")
+                log.dbg("[STATS] Detailed lists cleared from memory after flush")
         except Exception as e:
             print(f"\n[ERROR] Failed to append snapshot: {e}")
